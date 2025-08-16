@@ -1,8 +1,8 @@
 import typescript from 'rollup-plugin-typescript2';
-import commonjs from 'rollup-plugin-commonjs';
-import nodeResolve from 'rollup-plugin-node-resolve';
-import babel from 'rollup-plugin-babel';
-import { terser } from 'rollup-plugin-terser';
+import commonjs from '@rollup/plugin-commonjs';
+import { nodeResolve } from '@rollup/plugin-node-resolve';
+import babel from '@rollup/plugin-babel';
+import terser from '@rollup/plugin-terser';
 import serve from 'rollup-plugin-serve';
 import json from '@rollup/plugin-json';
 
@@ -20,17 +20,11 @@ const serveopts = {
 
 const plugins = [
   nodeResolve({}),
-  commonjs({
-    namedExports: {
-      // left-hand side can be an absolute path, a path
-      // relative to the current directory, or the name
-      // of a module in node_modules
-      'yaml': [ 'parse' ]
-    }
-  }),
+  commonjs(),
   typescript(),
   json(),
   babel({
+    babelHelpers: 'bundled',
     exclude: 'node_modules/**',
   }),
   dev && serve(serveopts),
