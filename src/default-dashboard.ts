@@ -78,6 +78,72 @@ const setDefaultDashboardOption = async (hass: HomeAssistant, dropdownEntityId: 
 
 // (removed) enableIfNull was unused
 
+// Refresh options for all default-dashboard input_select helpers (global + all users)
+const refreshAllDefaultDashboardDropdowns = async (
+  hass: HomeAssistant,
+  triggeringDropdownId?: string,
+) => {
+  const ENTITY_PREFIX = `input_select.${ENTITY_ID}`; // matches input_select.default_dashboard and input_select.default_dashboard_*
+  log(
+    `Begin refreshAll: trigger=${String(triggeringDropdownId)}; totalStates=${Object.keys(hass.states || {}).length}`,
+  );
+  // Build options from dashboards
+  const urls = await getUrlsHash();
+  const dynamicOptions = Object.keys(urls).filter((k) => k && k !== OVERVIEW_OPTION && k !== REFRESH_OPTION);
+  const options = [OVERVIEW_OPTION, ...dynamicOptions, REFRESH_OPTION];
+  log(
+    `Computed options: count=${options.length}, options=[${options.join(', ')}], dynamicCount=${dynamicOptions.length}`,
+  );
+
+  // Discover all default-dashboard dropdowns in state
+  const allDropdownIds = Object.keys(hass.states || {}).filter((eid) =>
+    eid.startsWith(ENTITY_PREFIX),
+  );
+  log(
+    `Discovered dropdowns: count=${allDropdownIds.length}, ids=[${allDropdownIds.join(', ')}]`,
+  );
+
+  // Record current selections for potential restore
+  const currentSelections: Record<string, string | undefined> = {};
+  for (const id of allDropdownIds) {
+    const state = hass.states[id]?.state as string | undefined;
+    currentSelections[id] = state;
+    if (state && state !== REFRESH_OPTION) setLastSavedOption(id, state);
+  }
+  log(
+    `Pre-update selections: ${allDropdownIds
+      .map((id) => `${id}=${String(currentSelections[id])}`)
+      .join('; ')}`,
+  );
+
+  // Apply options to every discovered dropdown
+  for (const id of allDropdownIds) {
+    await setDefaultDashboardOptions(hass, id, options);
+  }
+  log(`Applied options to ${allDropdownIds.length} dropdown(s)`);
+
+  // After refresh, restore dropdowns that were on refresh to their last saved option if valid.
+  // If no valid last option exists, fall back to lovelace.
+  for (const id of allDropdownIds) {
+    const wasRefresh = currentSelections[id] === REFRESH_OPTION;
+    const last = getLastSavedOption(id);
+    const lastIsValid = Boolean(last && last !== REFRESH_OPTION && options.includes(last));
+    log(
+      `Post-refresh restore: id=${id}, wasRefresh=${String(wasRefresh)}, last=${String(
+        last,
+      )}, lastIsValid=${lastIsValid}`,
+    );
+    if (!wasRefresh) continue;
+    if (lastIsValid && last) {
+      await setDefaultDashboardOption(hass, id, last);
+      log(`Restored dropdown=${id} to last=${last}`);
+    } else {
+      await setDefaultDashboardOption(hass, id, OVERVIEW_OPTION);
+      log(`No valid last option; set dropdown=${id} to ${OVERVIEW_OPTION}`);
+    }
+  }
+};
+
 // Derive helper entity ids for both user and global (user overrides global)
 const getHelperEntityIds = (hass: HomeAssistant) => {
   const userId = hass.user?.id || '';
@@ -176,37 +242,14 @@ const setDefaultDashboard = async (url: string) => {
   log(`Module initialized for user: id=${hass.user?.id}, name=${hass.user?.name}`);
   // Second, we pass it into our controller instance
   controller = new Controller(hass);
-  // Global check: if any dropdown (user or global) is set to refresh, rebuild options for all
+  // Global check: if any default-dashboard dropdown (any user/global) is set to refresh, rebuild options for ALL
   {
-    const { userDropdown, globalDropdown } = getHelperEntityIds(hass);
-    const dropdownIds = [userDropdown, globalDropdown];
-    // Before any action, record current non-refresh selections as last known
-    dropdownIds.forEach((id) => {
-      const current = hass.states[id]?.state as string | undefined;
-      if (current && current !== REFRESH_OPTION) setLastSavedOption(id, current);
-    });
-    const anyRefresh = dropdownIds.some((id) => hass.states[id]?.state === REFRESH_OPTION);
-    if (anyRefresh) {
-      log('Refreshing dropdown options for all helpers (global check)');
-      const urls = await getUrlsHash();
-      const dynamicOptions = Object.keys(urls).filter((k) => k && k !== OVERVIEW_OPTION && k !== REFRESH_OPTION);
-      const options = [OVERVIEW_OPTION, ...dynamicOptions, REFRESH_OPTION];
-
-      for (const id of dropdownIds) {
-        if (hass.states[id] !== undefined) {
-          await setDefaultDashboardOptions(hass, id, options);
-        }
-      }
-      // Restore previous selection for any dropdown currently on refresh, if we have one and it's valid
-      for (const id of dropdownIds) {
-        const isOnRefresh = hass.states[id]?.state === REFRESH_OPTION;
-        if (isOnRefresh) {
-          const last = getLastSavedOption(id);
-          if (last && options.includes(last)) {
-            await setDefaultDashboardOption(hass, id, last);
-          }
-        }
-      }
+    const anyDefaultDashboardIsRefresh = Object.entries(hass.states || {})
+      .filter(([id]) => id.startsWith(`input_select.${ENTITY_ID}`))
+      .some(([, v]: any) => v?.state === REFRESH_OPTION);
+    if (anyDefaultDashboardIsRefresh) {
+      log('Detected at least one dropdown on refresh (startup). Refreshing ALL default-dashboard dropdowns.');
+      await refreshAllDefaultDashboardDropdowns(hass);
       return;
     }
   }
@@ -218,27 +261,8 @@ const setDefaultDashboard = async (url: string) => {
   if (my_lovelace_url) {
     // Sixth, we see if that URL is refresh, and if it is we refresh our input select's options.
     if (my_lovelace_url === 'refresh') {
-      log('Refreshing dropdown options for all helpers');
-      const urls = await getUrlsHash();
-      const dynamicOptions = Object.keys(urls).filter((k) => k && k !== OVERVIEW_OPTION && k !== REFRESH_OPTION);
-      const options = [OVERVIEW_OPTION, ...dynamicOptions, REFRESH_OPTION];
-
-      // Update options for both user and global dropdowns when any is refreshed
-      const { userDropdown, globalDropdown } = getHelperEntityIds(hass);
-      const targetDropdowns = [userDropdown, globalDropdown].filter((id) => hass.states[id] !== undefined);
-      // Record current non-refresh selections before changing options
-      targetDropdowns.forEach((id) => {
-        const current = hass.states[id]?.state as string | undefined;
-        if (current && current !== REFRESH_OPTION) setLastSavedOption(id, current);
-      });
-      for (const id of targetDropdowns) {
-        await setDefaultDashboardOptions(hass, id, options);
-      }
-      // Restore previous selection for the dropdown that triggered refresh, if available and valid
-      const lastForTrigger = getLastSavedOption(dropdownEntityId);
-      if (lastForTrigger && options.includes(lastForTrigger)) {
-        await setDefaultDashboardOption(hass, dropdownEntityId, lastForTrigger);
-      }
+      log('Refreshing dropdown options for ALL default-dashboard dropdowns (triggered by user)');
+      await refreshAllDefaultDashboardDropdowns(hass, dropdownEntityId);
       return;
     } else {
       // Sixth-else, we try to enable default dashboard for this user, and then try to set the default dashboard for this user
