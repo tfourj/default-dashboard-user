@@ -1,5 +1,5 @@
 ## default-dashboard-user
-Forked from daredoes/default-dashboard repo with some improvements and aditional features
+Forked from [daredoes/default-dashboard](https://github.com/daredoes/default-dashboard) repo with some improvements and aditional features
 
 ### Installation
 
