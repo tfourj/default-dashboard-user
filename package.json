@@ -1,0 +1,36 @@
+{
+  "name": "default-dashboard-user",
+  "version": "1.0.0",
+  "description": "Sets the default dashboard for lovelace automatically, aditional user based settings",
+  "module": "default-dashboard.js",
+  "repository": "git@github.com:tfourj/default-dashboard-user.git",
+  "keywords": [
+    "home-assistant"
+  ],
+  "author": "TfourJ (original author: daredoes)",
+  "license": "MIT",
+  "dependencies": {
+    "custom-card-helpers": "^1.9.0",
+    "eslint": "^9.33.0",
+    "rollup-plugin-babel": "^4.4.0",
+    "typescript-eslint": "^8.39.1"
+  },
+  "devDependencies": {
+    "@rollup/plugin-json": "^6.1.0",
+    "rollup": "^2.79.2",
+    "rollup-plugin-commonjs": "^10.1.0",
+    "rollup-plugin-node-resolve": "^5.2.0",
+    "rollup-plugin-serve": "^3.0.0",
+    "rollup-plugin-terser": "^7.0.2",
+    "rollup-plugin-typescript2": "^0.36.0",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "start": "export ROLLUP_WATCH=true && rollup -c --watch",
+    "prestart": "node -p \"'export const LIB_VERSION = ' + JSON.stringify(require('./package.json').version) + ';'\" > src/version.ts",
+    "prebuild": "node -p \"'export const LIB_VERSION = ' + JSON.stringify(require('./package.json').version) + ';'\" > src/version.ts",
+    "build": "npm run lint && npm run rollup",
+    "lint": "eslint src/*.ts",
+    "rollup": "rollup -c"
+  }
+}
