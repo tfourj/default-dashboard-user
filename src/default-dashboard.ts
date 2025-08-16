@@ -76,16 +76,7 @@ const setDefaultDashboardOption = async (hass: HomeAssistant, dropdownEntityId: 
   );
 };
 
-// Checks if the managing local setting is null, and if it is sets it to true
-const enableIfNull = async () => {
-  const settings = await controller.getStorageSettings();
-  log(`Storage settings: defaultPanel=${settings.defaultPanel}, isDefaultPanelManaged=${settings.isDefaultPanelManaged}`);
-  if (settings.isDefaultPanelManaged === null) {
-    await controller.enable();
-    return true;
-  }
-  return false;
-};
+// (removed) enableIfNull was unused
 
 // Derive helper entity ids for both user and global (user overrides global)
 const getHelperEntityIds = (hass: HomeAssistant) => {

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { HomeAssistant } from 'custom-card-helpers';
 import { log } from './helpers';
 import LOCAL_STORAGE_OPTIONS from './helpers/storageOptions';
