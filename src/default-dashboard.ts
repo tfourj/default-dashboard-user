@@ -122,25 +122,33 @@ const refreshAllDefaultDashboardDropdowns = async (
   }
   log(`Applied options to ${allDropdownIds.length} dropdown(s)`);
 
-  // After refresh, restore dropdowns that were on refresh to their last saved option if valid.
-  // If no valid last option exists, fall back to lovelace.
+  // After refresh, restore every dropdown to a sensible target.
+  // Rules:
+  // - If previously on refresh: restore to last saved valid option; else fall back to lovelace.
+  // - If previously on a specific dashboard: keep it if still valid; else try last saved valid; else fall back to lovelace.
   for (const id of allDropdownIds) {
-    const wasRefresh = currentSelections[id] === REFRESH_OPTION;
+    const previous = currentSelections[id];
     const last = getLastSavedOption(id);
+    const previousIsValid = Boolean(previous && previous !== REFRESH_OPTION && options.includes(previous));
     const lastIsValid = Boolean(last && last !== REFRESH_OPTION && options.includes(last));
-    log(
-      `Post-refresh restore: id=${id}, wasRefresh=${String(wasRefresh)}, last=${String(
-        last,
-      )}, lastIsValid=${lastIsValid}`,
-    );
-    if (!wasRefresh) continue;
-    if (lastIsValid && last) {
-      await setDefaultDashboardOption(hass, id, last);
-      log(`Restored dropdown=${id} to last=${last}`);
+
+    let target: string;
+    if (previous === REFRESH_OPTION) {
+      target = lastIsValid && last ? last : OVERVIEW_OPTION;
+    } else if (previousIsValid && previous) {
+      target = previous;
+    } else if (lastIsValid && last) {
+      target = last;
     } else {
-      await setDefaultDashboardOption(hass, id, OVERVIEW_OPTION);
-      log(`No valid last option; set dropdown=${id} to ${OVERVIEW_OPTION}`);
+      target = OVERVIEW_OPTION;
     }
+
+    log(
+      `Post-refresh restore: id=${id}, prev=${String(previous)}, last=${String(
+        last,
+      )}, prevIsValid=${previousIsValid}, lastIsValid=${lastIsValid}, target=${target}`,
+    );
+    await setDefaultDashboardOption(hass, id, target);
   }
 };
 
