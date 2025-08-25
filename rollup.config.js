@@ -38,7 +38,7 @@ export default [
       file: 'dist/default-dashboard-user.js',
       format: 'es',
       inlineDynamicImports: true,
-      sourcemap: true,
+      sourcemap: false,
     },
     plugins: [...plugins],
   },
