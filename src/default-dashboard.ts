@@ -7,233 +7,138 @@ import { HomeAssistant } from 'custom-card-helpers';
 // import { HassDefaultEvent } from './types';
 
 log(`${localize('common.version')} ${LIB_VERSION}`);
-const ENTITY_ID = 'default_dashboard';
-const REFRESH_OPTION = 'refresh';
 const OVERVIEW_OPTION = 'lovelace';
-const LAST_OPTION_PREFIX = 'defaultDashboard:lastOption:';
 
 let controller: Controller;
 
-// Persist and restore last non-refresh selection for each dropdown
-const getLastSavedOption = (dropdownEntityId: string): string | null => {
+// Normalize a dashboard value (string or URL) to a Lovelace url_path slug
+const toDashboardSlug = (input: unknown): string => {
+  if (typeof input !== 'string') return '';
+  let s = input.trim();
+  if (!s) return '';
+  // Strip query/hash early
+  s = s.split('#')[0].split('?')[0];
+  // If full URL, extract pathname
   try {
-    return localStorage.getItem(`${LAST_OPTION_PREFIX}${dropdownEntityId}`);
+    const u = new URL(s);
+    s = u.pathname || '';
   } catch {
-    return null;
+    // Not a full URL; keep as-is
   }
+  // Remove leading slash
+  if (s.startsWith('/')) s = s.slice(1);
+  // Take only the first path segment (before any "/")
+  const first = s.split('/')[0]?.trim() || '';
+  return first;
 };
 
-const setLastSavedOption = (dropdownEntityId: string, option: string): void => {
-  if (!option || option === REFRESH_OPTION) return;
+// Load desired dashboard(s) from local JSON file with cache-busting param
+const loadDashboardsFromLocalFile = async (
+  hass?: HomeAssistant,
+): Promise<{ defaultUrl: string | null; allowed: Record<string, boolean> }> => {
+  const versionParam = Date.now();
+  const url = `/local/default-dashboard.json?v=${versionParam}`;
   try {
-    localStorage.setItem(`${LAST_OPTION_PREFIX}${dropdownEntityId}`, option);
-  } catch {
-    // ignore
-  }
-};
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data: unknown = await res.json();
+    let defaultUrl: string | null = null;
+    const allowed: Record<string, boolean> = {};
 
-// Gets the dashboards, and then puts the url_path attributes in a hash
-const getUrlsHash = async (): Promise<Record<string, boolean>> => {
-  try {
-    const dashboards = await controller.getDashboards();
-    const urls = {} as Record<string, boolean>;
-    dashboards.forEach((d) => {
-      urls[d.url_path] = true;
-    });
-    // Always allow Overview (lovelace) as a valid target
-    urls[OVERVIEW_OPTION] = true;
-    log(`Fetched dashboards: count=${dashboards.length}, urls=[${Object.keys(urls).join(', ')}]`);
-    return urls;
-  } catch (err) {
-    log('Error fetching dashboards', err);
-    return {};
-  }
-};
+    if (typeof data === 'string') {
+      const slug = toDashboardSlug(data);
+      defaultUrl = slug || null;
+    } else if (data && typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      const userName = (hass?.user?.name || '').toLowerCase();
+      const users = (obj.users && typeof obj.users === 'object' ? (obj.users as Record<string, unknown>) : undefined) || undefined;
+      const global = obj.global as unknown;
 
-// Calls the HASS service to set the options for an input select
-const setDefaultDashboardOptions = async (hass: HomeAssistant, dropdownEntityId: string, options: string[]) => {
-  log(`Setting options for ${dropdownEntityId}: [${options.join(', ')}]`);
-  return hass.callService(
-    'input_select',
-    'set_options',
-    {
-      options,
-    },
-    { entity_id: dropdownEntityId },
-  );
-};
+      if (users) {
+        // Collect allowed from enabled user entries and resolve match for current user
+        for (const [key, value] of Object.entries(users)) {
+          if (typeof value === 'string') {
+            const slug = toDashboardSlug(value);
+            if (slug) allowed[slug] = true;
+            if (!defaultUrl && userName && key.toLowerCase() === userName && slug) {
+              defaultUrl = slug;
+            }
+            continue;
+          }
+          if (value && typeof value === 'object') {
+            const valObj = value as Record<string, unknown>;
+            const enabled = Object.prototype.hasOwnProperty.call(valObj, 'enabled') ? Boolean(valObj.enabled) : true;
+            const slug = typeof valObj.dashboard === 'string' ? toDashboardSlug(valObj.dashboard as string) : '';
+            if (enabled && slug) {
+              allowed[slug] = true;
+              if (!defaultUrl && userName && key.toLowerCase() === userName) {
+                defaultUrl = slug;
+              }
+            }
+          }
+        }
+      }
 
-// Calls the HASS service to select the option for an input select
-const setDefaultDashboardOption = async (hass: HomeAssistant, dropdownEntityId: string, option: string) => {
-  log(`Selecting option for ${dropdownEntityId}: ${option}`);
-  return hass.callService(
-    'input_select',
-    'select_option',
-    {
-      option,
-    },
-    { entity_id: dropdownEntityId },
-  );
-};
+      // Prefer global fallback when user is not defined; support string or { url, enabled }
+      if (!defaultUrl) {
+        let globalEnabled = true;
+        let globalSlug: string | null = null;
+        if (typeof global === 'string') {
+          globalSlug = toDashboardSlug(global);
+        } else if (global && typeof global === 'object') {
+          const gObj = global as Record<string, unknown>;
+          globalEnabled = Object.prototype.hasOwnProperty.call(gObj, 'enabled') ? Boolean(gObj.enabled) : true;
+          const gDash = typeof gObj.dashboard === 'string' ? (gObj.dashboard as string) : '';
+          globalSlug = toDashboardSlug(gDash);
+        }
+        if (globalEnabled && globalSlug) {
+          defaultUrl = globalSlug;
+          allowed[defaultUrl] = true;
+        }
+      }
 
-// (removed) enableIfNull was unused
 
-// Refresh options for all default-dashboard input_select helpers (global + all users)
-const refreshAllDefaultDashboardDropdowns = async (
-  hass: HomeAssistant,
-  triggeringDropdownId?: string,
-) => {
-  const ENTITY_PREFIX = `input_select.${ENTITY_ID}`; // matches input_select.default_dashboard and input_select.default_dashboard_*
-  log(
-    `Begin refreshAll: trigger=${String(triggeringDropdownId)}; totalStates=${Object.keys(hass.states || {}).length}`,
-  );
-  // Build options from dashboards
-  const urls = await getUrlsHash();
-  const dynamicOptions = Object.keys(urls).filter((k) => k && k !== OVERVIEW_OPTION && k !== REFRESH_OPTION);
-  const options = [OVERVIEW_OPTION, ...dynamicOptions, REFRESH_OPTION];
-  log(
-    `Computed options: count=${options.length}, options=[${options.join(', ')}], dynamicCount=${dynamicOptions.length}`,
-  );
+      // Legacy fields as last resort
+      if (!defaultUrl) {
+        const candidates = [obj.default, obj.dashboard, obj.dashboard, obj.panel, obj.path];
+        const first = candidates.find((v) => typeof v === 'string' && toDashboardSlug(v as string).length > 0) as string | undefined;
+        const slug = first ? toDashboardSlug(first) : '';
+        defaultUrl = slug || null;
+        if (slug) allowed[slug] = true;
+      }
 
-  // Discover all default-dashboard dropdowns in state
-  const allDropdownIds = Object.keys(hass.states || {}).filter((eid) =>
-    eid.startsWith(ENTITY_PREFIX),
-  );
-  log(
-    `Discovered dropdowns: count=${allDropdownIds.length}, ids=[${allDropdownIds.join(', ')}]`,
-  );
-
-  // Record current selections for potential restore
-  const currentSelections: Record<string, string | undefined> = {};
-  for (const id of allDropdownIds) {
-    const state = hass.states[id]?.state as string | undefined;
-    currentSelections[id] = state;
-    if (state && state !== REFRESH_OPTION) setLastSavedOption(id, state);
-  }
-  log(
-    `Pre-update selections: ${allDropdownIds
-      .map((id) => `${id}=${String(currentSelections[id])}`)
-      .join('; ')}`,
-  );
-
-  // Apply options to every discovered dropdown
-  for (const id of allDropdownIds) {
-    await setDefaultDashboardOptions(hass, id, options);
-  }
-  log(`Applied options to ${allDropdownIds.length} dropdown(s)`);
-
-  // After refresh, restore every dropdown to a sensible target.
-  // Rules:
-  // - If previously on refresh: restore to last saved valid option; else fall back to lovelace.
-  // - If previously on a specific dashboard: keep it if still valid; else try last saved valid; else fall back to lovelace.
-  for (const id of allDropdownIds) {
-    const previous = currentSelections[id];
-    const last = getLastSavedOption(id);
-    const previousIsValid = Boolean(previous && previous !== REFRESH_OPTION && options.includes(previous));
-    const lastIsValid = Boolean(last && last !== REFRESH_OPTION && options.includes(last));
-
-    let target: string;
-    if (previous === REFRESH_OPTION) {
-      target = lastIsValid && last ? last : OVERVIEW_OPTION;
-    } else if (previousIsValid && previous) {
-      target = previous;
-    } else if (lastIsValid && last) {
-      target = last;
-    } else {
-      target = OVERVIEW_OPTION;
+      // Final fallback: lovelace
+      if (!defaultUrl) {
+        defaultUrl = OVERVIEW_OPTION;
+      }
     }
 
+    // Always allow Overview as a valid target
+    allowed[OVERVIEW_OPTION] = true;
+
     log(
-      `Post-refresh restore: id=${id}, prev=${String(previous)}, last=${String(
-        last,
-      )}, prevIsValid=${previousIsValid}, lastIsValid=${lastIsValid}, target=${target}`,
+      `Loaded default-dashboard.json: default=${String(defaultUrl)}, allowed=[${Object.keys(allowed).join(', ')}]`,
     );
-    await setDefaultDashboardOption(hass, id, target);
+    return { defaultUrl, allowed };
+  } catch (err) {
+    log('Failed to load /local/default-dashboard.json', err);
+    return { defaultUrl: null, allowed: { [OVERVIEW_OPTION]: true } };
   }
 };
 
-// Derive helper entity ids for both user and global (user overrides global)
-const getHelperEntityIds = (hass: HomeAssistant) => {
-  const userId = hass.user?.id || '';
-  const userName = hass.user?.name || '';
-  const slug = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9_]+/g, '_');
-  const suffix = slug(userName) || slug(userId);
-  const userDropdown = `input_select.${ENTITY_ID}_${suffix}`;
-  const userToggle = `input_boolean.${ENTITY_ID}_${suffix}`;
-  const globalDropdown = `input_select.${ENTITY_ID}`;
-  const globalToggle = `input_boolean.${ENTITY_ID}`;
-  log(
-    `Helper ids: user(suffix=${suffix}) dropdown=${userDropdown}, toggle=${userToggle}; global dropdown=${globalDropdown}, toggle=${globalToggle}`,
-  );
-  return { userDropdown, userToggle, globalDropdown, globalToggle, suffix };
-};
 
-// Choose active helpers: user (if present and enabled) overrides global; else fallback to global
-const getUrlAndToggle = (hass: HomeAssistant) => {
-  const { userDropdown, userToggle, globalDropdown, globalToggle, suffix } = getHelperEntityIds(hass);
-
-  const userUrl = hass.states[userDropdown]?.state;
-  const userEnabled = hass.states[userToggle]?.state;
-  const globalUrl = hass.states[globalDropdown]?.state;
-  const globalEnabled = hass.states[globalToggle]?.state;
-
-  const stateCount = Object.keys(hass.states || {}).length;
-  log(
-    `Helper check: states=${stateCount}, user: ${userDropdown} -> ${String(userUrl)}, ${userToggle} -> ${String(
-      userEnabled,
-    )}; global: ${globalDropdown} -> ${String(globalUrl)}, ${globalToggle} -> ${String(globalEnabled)}`,
-  );
-
-  // Use user-scoped when present and toggle is on
-  if (userUrl !== undefined && userEnabled !== undefined && userEnabled === 'on') {
-    return { url: userUrl, enabled: true, dropdownEntityId: userDropdown };
-  }
-
-  // Fallback to global when present
-  if (globalUrl !== undefined && globalEnabled !== undefined) {
-    return { url: globalUrl, enabled: globalEnabled === 'on', dropdownEntityId: globalDropdown };
-  }
-
-  // Missing helpers; log guidance
-  if (userUrl === undefined || userEnabled === undefined) {
-    log(
-      `User helpers missing. Please create input_select.${ENTITY_ID}_${suffix} (include option "refresh") and input_boolean.${ENTITY_ID}_${suffix}.`,
-    );
-  }
-  if (globalUrl === undefined || globalEnabled === undefined) {
-    log(
-      `Global helpers missing. Please create input_select.${ENTITY_ID} (include option "refresh") and input_boolean.${ENTITY_ID}.`,
-    );
-  }
-  // Prefer user dropdown id in return to aid users creating it next
-  return { url: null as string | null, enabled: false, dropdownEntityId: userDropdown };
-};
-
-// Try to enable Default Dashboard, if that is current setting
-const tryEnabledDefaultDashboard = async (enabled: boolean) => {
-  if (enabled) {
-    await controller.enable();
-    log('Default Dashboard Enabled');
-    return true;
-  }
-  await controller.disable();
-  log('Default Dashboard Disabled');
-  return false;
-};
-
-// Sets the default panel to whatever the given url is, if valid
+// Sets the default panel to whatever the given url is (no panels/cards validation)
 const setDefaultDashboard = async (url: string) => {
   const managedPanel = `"${url}"`;
   const settings = await controller.getStorageSettings();
-  const urls = await getUrlsHash();
-  log(`Set default attempt: url=${url}, validUrl=${Boolean(urls[url])}`);
-  if (urls[url]) {
-    if (settings.defaultPanel !== managedPanel) {
-      log(`Setting default panel to ${managedPanel}`);
-      await controller.setDefaultPanel(managedPanel);
-      // Reload the homepage after setting the new homepage
-      location.replace('/');
-    }
+  log(`Set default attempt (file-driven): url=${url}`);
+  if (settings.defaultPanel !== managedPanel) {
+    log(`Setting default panel to ${managedPanel}`);
+    await controller.setDefaultPanel(managedPanel);
+    // Reload the homepage after setting the new homepage
+    location.replace('/');
   }
 };
 
@@ -250,34 +155,12 @@ const setDefaultDashboard = async (url: string) => {
   log(`Module initialized for user: id=${hass.user?.id}, name=${hass.user?.name}`);
   // Second, we pass it into our controller instance
   controller = new Controller(hass);
-  // Global check: if any default-dashboard dropdown (any user/global) is set to refresh, rebuild options for ALL
-  {
-    const anyDefaultDashboardIsRefresh = Object.entries(hass.states || {})
-      .filter(([id]) => id.startsWith(`input_select.${ENTITY_ID}`))
-      .some(([, v]: any) => v?.state === REFRESH_OPTION);
-    if (anyDefaultDashboardIsRefresh) {
-      log('Detected at least one dropdown on refresh (startup). Refreshing ALL default-dashboard dropdowns.');
-      await refreshAllDefaultDashboardDropdowns(hass);
-      return;
-    }
-  }
-  // Per-user only; no default dashboard listener
-  // Fourth, we get the url and toggle status of our helpers
-  const { url: my_lovelace_url, enabled: default_dashboard_enabled, dropdownEntityId } = getUrlAndToggle(hass);
-  log(`111Startup state: dropdown=${dropdownEntityId}, url=${String(my_lovelace_url)}, enabled=${String(default_dashboard_enabled)}`);
-  // Fifth, we confirm we have a url
-  if (my_lovelace_url) {
-    // Sixth, we see if that URL is refresh, and if it is we refresh our input select's options.
-    if (my_lovelace_url === 'refresh') {
-      log('Refreshing dropdown options for ALL default-dashboard dropdowns (triggered by user)');
-      await refreshAllDefaultDashboardDropdowns(hass, dropdownEntityId);
-      return;
-    } else {
-      // Sixth-else, we try to enable default dashboard for this user, and then try to set the default dashboard for this user
-      // Persist last chosen non-refresh option
-      setLastSavedOption(dropdownEntityId, my_lovelace_url);
-      await tryEnabledDefaultDashboard(default_dashboard_enabled);
-      await setDefaultDashboard(my_lovelace_url);
-    }
+  // Load desired default dashboard from local JSON (bypass panels/cards and helpers)
+  const { defaultUrl } = await loadDashboardsFromLocalFile(hass);
+  if (defaultUrl) {
+    await setDefaultDashboard(defaultUrl);
+  } else {
+    log('No default dashboard specified in /local/default-dashboard.json; nothing to do.');
   }
 })();
+

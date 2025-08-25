@@ -1,6 +1,6 @@
 {
   "name": "default-dashboard-user",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Sets the default dashboard for lovelace automatically, aditional user based settings",
   "type": "module",
   "module": "default-dashboard.js",
